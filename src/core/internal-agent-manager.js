@@ -414,6 +414,24 @@ class InternalAgentManager {
     }
     const collectionAvailability = this.collectionAvailability(session);
     if (!collectionAvailability.available) throw new Error(collectionAvailability.reason);
+    // 单例模式：未登录时直接进入等待登录，不跑流程。
+    // B 站 2026-08 起 x/web-interface/view 无 cookie 必返 412，“公开获取优先”已不可用，
+    // 未登录启动必然失败——提前提示，避免撞 412 后才告知。
+    if (session.mode === 'single' && !this.getCurrentUser()?.isLogin) {
+      const task = this.store.getTask(session.singleTaskId);
+      session.status = 'waiting-login';
+      session.phase = '等待 Bilibili 登录';
+      session.lastError = '';
+      this.saveSession(session);
+      this.emit({
+        type: 'login-required',
+        sessionId: session.id,
+        bvid: task?.bvid || '',
+        title: task?.title || '',
+        reason: '单视频总结需要 Bilibili 登录：B 站已要求携带登录状态才能读取视频信息。请先完成登录，再点击“登录后重试”。'
+      });
+      return this.publicSession(session);
+    }
     const modelAvailability = this.modelAvailability(session);
     if (!modelAvailability.available) throw new Error(modelAvailability.reason);
     const scheduler = this.toolRunner.getState?.() || {};
@@ -453,24 +471,6 @@ class InternalAgentManager {
       this.store.upsertTask(task);
       this.store.commit();
       this.log(session, `已同步 ${user.name || user.mid} 的登录状态，准备重试。`);
-    }
-    // 单例模式（视频总结-单个）：已登录时始终携带最新 cookie。
-    // B 站自 2026-08 起 x/web-interface/view 无 cookie 必返 412 request was banned，
-    // “公开获取优先”已失效；未登录则跳过（登录检查由 UI 的 -101 轮询提示）。
-    if (session.mode === 'single') {
-      const user = this.getCurrentUser();
-      if (user?.isLogin) {
-        const task = this.store.getTask(session.singleTaskId);
-        if (task && !task.cookieFile) {
-          try {
-            task.cookieFile = await this.bili.exportCookies(user.name || String(user.mid));
-            this.store.upsertTask(task);
-            this.store.commit();
-          } catch (error) {
-            this.log(session, `单例 cookie 导出失败（将尝试公开获取）：${error.message || String(error)}`);
-          }
-        }
-      }
     }
     const worker = this.store.getWorker(session.workerId);
     if (worker?.status === 'paused') this.store.updateWorker(worker.id, { status: 'active' });
@@ -838,15 +838,67 @@ class InternalAgentManager {
           return;
         }
         if (isBilibiliBannedError(error)) {
+          // 公开优先语义：先无 cookie 公开尝试；B 站 2026-08 起 x/web-interface/view
+          // 无 cookie 必返 412。已登录时自动降级为带 cookie 重试一次（不打断用户），
+          // 降级后仍 412 才是真风控（进入下方退避分支）。
+          const collection = this.store.getCollectionById(String(session.collectionId || ''));
+          const hasCookie = Boolean(
+            (task.cookieFile && fs.existsSync(task.cookieFile)) ||
+            (collection?.cookieFile && fs.existsSync(collection.cookieFile))
+          );
+          if (!hasCookie && !latest.bannedCookieRetried) {
+            const user = this.getCurrentUser();
+            if (user?.isLogin) {
+              latest.bannedCookieRetried = true;
+              try {
+                task.cookieFile = await this.bili.exportCookies(user.name || String(user.mid));
+                this.store.upsertTask(task);
+                this.store.commit();
+                latest.currentTaskId = '';
+                latest.currentRunId = '';
+                this.saveSession(latest);
+                this.log(latest, '公开获取被 B 站拒绝（HTTP 412），已自动切换为登录态请求重试。');
+                await this.processTask(latest, task, signal);
+                continue; // 降级成功：继续循环（任务 done 后自然无任务可领，会话以 idle 正常收尾）
+              } catch (retryError) {
+                if (isBilibiliBannedError(retryError)) {
+                  // 带 cookie 仍 412：真风控，落到下方退避分支
+                  error = retryError;
+                } else {
+                  this.log(latest, `登录态重试失败：${retryError.message || String(retryError)}`);
+                  throw retryError;
+                }
+              }
+            }
+          }
           // B 站短时风控（HTTP 412 request was banned）：任务保留、可重试，不删除、不阻塞会话。
           // 同时进入 10 分钟退避窗口：未到期不领取任何任务（会话本轮 idle 结束），
           // 避免零间隔热循环重试持续轰炸 B 站（否则风控窗口会被应用自身维持不解除）。
           // 无 cookie 的 412 是 B 站对未携带登录态请求的拒绝（x/web-interface/view 无 cookie 必 412），
-          // 提示登录而不是“稍等重试”，避免误导。
-          const hasCookie = Boolean(task.cookieFile && fs.existsSync(task.cookieFile));
-          const reason = hasCookie
+          // 提示登录而不是“稍等重试”，避免误导。此处重新计算 hasCookie（降级可能已写入 cookie）。
+          const cookieAvailable = Boolean(
+            (task.cookieFile && fs.existsSync(task.cookieFile)) ||
+            (collection?.cookieFile && fs.existsSync(collection.cookieFile))
+          );
+          const reason = cookieAvailable
             ? `B站临时风控拦截（HTTP 412 request was banned）：请求过于频繁或触发风控，请稍等 5-10 分钟后在任务总览重试。`
             : `B站拒绝了未携带登录状态的请求（HTTP 412 request was banned）。请先前往 B站登录后重试。`;
+          if (!cookieAvailable) {
+            // 无 cookie 的 412 = B 站拒绝未携带登录态的请求：转 waiting-login，
+            // 渲染层弹窗引导去登录，登录后点“登录后重试”带 cookie 从头处理（与下载界面语义一致）。
+            latest.failed = Number(latest.failed || 0) + 1;
+            latest.status = 'waiting-login';
+            latest.phase = '等待 Bilibili 登录';
+            latest.lastError = reason;
+            latest.currentTaskId = '';
+            latest.currentRunId = '';
+            this.abortAttempt(task.id, latest.workerId, reason, 'bilibili-banned');
+            this.markMultipartTaskFailed(task, reason, 'bilibili-banned');
+            this.saveSession(latest);
+            this.log(latest, `公开获取失败：${reason}`, 'error');
+            this.emit({ type: 'login-required', sessionId: latest.id, bvid: task.bvid, title: task.title, reason });
+            return;
+          }
           latest.failed = Number(latest.failed || 0) + 1;
           latest.status = 'error';
           latest.phase = '任务失败（B站临时风控，稍后可重试）';

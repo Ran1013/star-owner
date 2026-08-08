@@ -678,6 +678,12 @@ async function fetchPlainJson(url, args) {
   }
   if (!response.ok) {
     if (response.status === 412) {
+      // 无 cookie 的 412 是 B 站对未携带登录态请求的拒绝（x/web-interface/view 无 cookie 必 412），
+      // 提示登录而不是“稍等重试”，避免误导；带 cookie 仍 412 才是频率风控。
+      const noCookie = !(args.cookies && fs.existsSync(path.resolve(args.cookies)));
+      if (noCookie) {
+        throw new Error(`B站拒绝了未携带登录状态的请求（HTTP 412 request was banned），请先登录后再试。${text.slice(0, 120)}`);
+      }
       // B 站风控拦截（-412 request was banned）：通常是短时频率风控，非代码/网络故障
       throw new Error(`B站临时风控拦截（HTTP 412 request was banned）：请求过于频繁或触发风控，请稍等 5-10 分钟后再试（任务会保留，可重试）。${text.slice(0, 120)}`);
     }

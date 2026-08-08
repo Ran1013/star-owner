@@ -11,7 +11,7 @@
     modelNew: $('#aiModelNewProvider'), modelProviderList: $('#aiModelProviderList'), modelProviderId: $('#aiModelProviderId'), modelProviderName: $('#aiModelProviderName'), modelProviderType: $('#aiModelProviderType'), modelProviderBaseUrl: $('#aiModelProviderBaseUrl'), modelProviderApiKey: $('#aiModelProviderApiKey'), modelProviderTemperature: $('#aiModelProviderTemperature'), modelProviderMaxTokens: $('#aiModelProviderMaxTokens'), modelProviderHeaders: $('#aiModelProviderHeaders'), modelDelete: $('#aiModelDeleteProvider'), modelSave: $('#aiModelSaveProvider'), modelFetch: $('#aiModelFetchModels'), modelTestButton: $('#rag-model-test-button'), modelCount: $('#aiModelRemoteCount'), modelRemote: $('#aiModelRemoteModels'),
     dependencyList: $('#dependencyList'), dependencyRefresh: $('#dependencyRefresh'), dependencyModal: $('#dependencyPromptModal'), dependencyMissing: $('#dependencyPromptMissing'), dependencyLater: $('#dependencyPromptLater'), dependencyDownload: $('#dependencyPromptDownload'), dependencyPromptMode: $('#dependencyPromptMode'), dependencyPromptModeText: $('#dependencyPromptModeText'),
     pathSafetyModal: $('#pathSafetyModal'), pathSafetySummary: $('#pathSafetySummary'), pathSafetyMessage: $('#pathSafetyMessage'), pathSafetyPath: $('#pathSafetyPath'), pathSafetyMoveStep: $('#pathSafetyMoveStep'), pathSafetyOpenProject: $('#pathSafetyOpenProject'), pathSafetyAcknowledge: $('#pathSafetyAcknowledge'),
-    loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), goLogin: $('#singleGoLogin'),
+    loginRequiredModal: $('#singleLoginRequiredModal'), loginRequiredVideo: $('#singleLoginRequiredVideo'), loginRequiredReason: $('#singleLoginRequiredReason'), loginLater: $('#singleLoginLater'), alreadyLoggedIn: $('#singleAlreadyLoggedIn'), goLogin: $('#singleGoLogin'),
     duplicateModal: $('#singleDuplicateModal'), duplicateMessage: $('#singleDuplicateMessage'), duplicateVideo: $('#singleDuplicateVideo'), duplicateMeta: $('#singleDuplicateMeta'), duplicateCancel: $('#singleDuplicateCancel'), duplicateRegenerate: $('#singleDuplicateRegenerate')
   };
 
@@ -996,6 +996,17 @@
   elements.saveCollection.addEventListener('click', saveCollection);
   elements.singleStart.addEventListener('click', startSingleTask);
   elements.loginLater.addEventListener('click', () => { elements.loginRequiredModal.hidden = true; });
+  elements.alreadyLoggedIn.addEventListener('click', async () => {
+    // 用户已在外完成登录：直接对当前等待登录的单例会话重试（start 会重新检测登录态并导出 cookie）
+    elements.loginRequiredModal.hidden = true;
+    const target = state.sessions.find((item) => item.id === activeSingleId && item.mode === 'single' && item.status === 'waiting-login')
+      || state.sessions.find((item) => item.mode === 'single' && item.status === 'waiting-login');
+    if (!target) { notify('未找到等待登录的单任务会话', '请回到“视频总结（单个）”重新开始。', 'error'); return; }
+    try {
+      await window.orchestrator.internalAgentStart(target.id);
+      await refreshAll({ quiet: true });
+    } catch (error) { notify('重试失败', error.message || String(error), 'error'); }
+  });
   elements.goLogin.addEventListener('click', () => { elements.loginRequiredModal.hidden = true; window.dispatchEvent(new CustomEvent('star:navigate', { detail: { page: 'login' } })); });
   elements.duplicateCancel.addEventListener('click', () => resolveDuplicateDecision('cancel'));
   elements.duplicateRegenerate.addEventListener('click', () => resolveDuplicateDecision('overwrite'));

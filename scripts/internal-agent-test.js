@@ -196,6 +196,8 @@ function assert(condition, message) {
   try { await manager.createSingleTask({ video: 'BVINVALID001', collectionId: collection.id, providerId: 'provider-test', modelId: 'missing-model' }); }
   catch { invalidSingleModelRejected = true; }
   assert(invalidSingleModelRejected && store.listTasks().length === tasksBeforeInvalidModel, 'invalid single-video model configuration left an orphan task');
+  // 单视频总结用户已登录（未登录启动会在 start 时直接转 waiting-login，见 forceLoginFailure 场景）
+  currentUser = { isLogin: true, name: '测试登录用户', mid: '100' };
   const session = await manager.createSingleTask({
     video: 'https://www.bilibili.com/video/BV1234567890',
     collectionId: collection.id,

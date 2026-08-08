@@ -407,7 +407,9 @@ class VideoCacheManager {
       } else if (error.code === 'BILIBILI_VIDEO_UNAVAILABLE' || isVideoUnavailableMessage(detail)) {
         this.updateJob(job, { status: 'skipped', phase: '视频已删除、下架或不可用', currentRunId: '', error: detail.slice(0, 2000), finishedAt: new Date().toISOString() });
         this.emitState('video-cache-download-skipped', { jobId: job.id, bvid: job.bvid, reason: detail.slice(0, 500) });
-      } else if (job.publicAttempt && isLoginRequiredMessage(detail)) {
+      } else if (job.publicAttempt && (isLoginRequiredMessage(detail) || /412|request was banned|B站临时风控拦截/i.test(detail))) {
+        // 公开尝试（无 cookie）遇 412：B 站自 2026-08 起 x/web-interface/view 无 cookie 必返 412，
+        // 语义等同“需要登录”——转 waiting-login，用户登录后带 cookie 重试，而非直接失败。
         this.updateJob(job, { status: 'waiting-login', phase: '等待 Bilibili 登录', progress: Math.max(0.04, Number(job.progress || 0)), currentRunId: '', error: detail.slice(0, 1200) });
         this.emitState('video-cache-login-required', { jobId: job.id, bvid: job.bvid, reason: detail.slice(0, 500) });
       } else {
